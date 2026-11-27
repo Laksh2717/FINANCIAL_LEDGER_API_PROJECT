@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from app.api.routers.users import router as users_router
 from app.config import Settings
 from app.errors import AppError
 from app.persistence.database import SqliteConnectionProvider
@@ -89,6 +90,8 @@ def create_app(
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    app.include_router(users_router, prefix="/v1")
 
     return app
 
