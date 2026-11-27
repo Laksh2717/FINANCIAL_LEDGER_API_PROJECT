@@ -6,6 +6,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.api.routers.users import router as users_router
+from app.api.routers.wallets import router as wallets_router
 from app.config import Settings
 from app.errors import AppError
 from app.persistence.database import SqliteConnectionProvider
@@ -92,6 +93,7 @@ def create_app(
         return {"status": "ok"}
 
     app.include_router(users_router, prefix="/v1")
+    app.include_router(wallets_router, prefix="/v1")
 
     return app
 
