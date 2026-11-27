@@ -1,9 +1,21 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.config import Settings
 from app.errors import AppError
+from app.persistence.database import SqliteConnectionProvider
+from app.persistence.schema import initialize_database
+from app.providers import (
+    ClockProvider,
+    DatabaseConnectionProvider,
+    IdentifierProvider,
+    SystemClockProvider,
+    UuidIdentifierProvider,
+)
 
 
 def error_response(
@@ -19,12 +31,40 @@ def error_response(
     )
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    clock_provider: ClockProvider | None = None,
+    id_provider: IdentifierProvider | None = None,
+    db_provider: DatabaseConnectionProvider | None = None,
+) -> FastAPI:
+    resolved_settings = settings or Settings.from_env()
+    resolved_clock = clock_provider or SystemClockProvider()
+    resolved_ids = id_provider or UuidIdentifierProvider()
+    resolved_db = db_provider or SqliteConnectionProvider(
+        resolved_settings.database_path,
+        busy_timeout_ms=resolved_settings.sqlite_busy_timeout_ms,
+    )
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        initialize_database(
+            app.state.db_provider,
+            app.state.clock_provider,
+            app.state.id_provider,
+            app.state.settings.supported_currencies,
+        )
+        yield
+
     app = FastAPI(
         title="Financial Ledger & Digital Wallet API",
         version="1.0.0",
+        lifespan=lifespan,
     )
-    app.state.settings = settings or Settings.from_env()
+    app.state.settings = resolved_settings
+    app.state.clock_provider = resolved_clock
+    app.state.id_provider = resolved_ids
+    app.state.db_provider = resolved_db
 
     @app.exception_handler(AppError)
     async def handle_app_error(_request: Request, exc: AppError) -> JSONResponse:

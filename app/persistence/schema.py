@@ -1,4 +1,12 @@
 import sqlite3
+from contextlib import closing
+
+from app.config import SUPPORTED_CURRENCIES
+from app.persistence.database import write_transaction
+from app.providers import ClockProvider, DatabaseConnectionProvider, IdentifierProvider
+
+SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000000"
+SYSTEM_USER_NAME = "SYSTEM"
 
 SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
@@ -87,3 +95,34 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
 def apply_schema(conn: sqlite3.Connection) -> None:
     for statement in SCHEMA_STATEMENTS:
         conn.execute(statement)
+
+
+def seed_system_accounts(
+    conn: sqlite3.Connection,
+    now_iso: str,
+    id_provider: IdentifierProvider,
+    supported_currencies: tuple[str, ...] = SUPPORTED_CURRENCIES,
+) -> None:
+    conn.execute(
+        "INSERT OR IGNORE INTO users (id, name, email, created_at) VALUES (?, ?, NULL, ?)",
+        (SYSTEM_USER_ID, SYSTEM_USER_NAME, now_iso),
+    )
+    for currency in supported_currencies:
+        conn.execute(
+            "INSERT OR IGNORE INTO wallets "
+            "(id, user_id, currency, balance_minor, is_system, created_at) "
+            "VALUES (?, ?, ?, 0, 1, ?)",
+            (id_provider.new_id(), SYSTEM_USER_ID, currency, now_iso),
+        )
+
+
+def initialize_database(
+    db_provider: DatabaseConnectionProvider,
+    clock_provider: ClockProvider,
+    id_provider: IdentifierProvider,
+    supported_currencies: tuple[str, ...] = SUPPORTED_CURRENCIES,
+) -> None:
+    now_iso = clock_provider.now_utc().isoformat()
+    with closing(db_provider.get_connection()) as conn, write_transaction(conn):
+        apply_schema(conn)
+        seed_system_accounts(conn, now_iso, id_provider, supported_currencies)
