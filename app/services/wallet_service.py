@@ -5,10 +5,12 @@ from app.domain.accounting import build_opening_entries
 from app.domain.ledger import chain_entries
 from app.domain.rules import validate_amount_minor, validate_currency, validate_uuid
 from app.errors import AppError
-from app.persistence.database import write_transaction
+from app.persistence.database import read_transaction, write_transaction
 from app.persistence.repositories.ledger_entry_repository import (
+    LedgerEntryRecord,
     get_last_entry_hash,
     insert_ledger_entries,
+    list_entries_by_wallet,
 )
 from app.persistence.repositories.transaction_repository import create_transaction
 from app.persistence.repositories.user_repository import get_user_by_id
@@ -16,6 +18,7 @@ from app.persistence.repositories.wallet_repository import (
     WalletRecord,
     create_wallet,
     get_system_wallet,
+    get_wallet_by_id,
     update_wallet_balance,
 )
 from app.persistence.schema import SYSTEM_USER_ID
@@ -97,3 +100,24 @@ class WalletService:
                 update_wallet_balance(conn, sys_wallet.id, sys_wallet.balance_minor - valid_amount)
 
             return wallet
+
+    def get_wallet(self, wallet_id: str) -> WalletRecord:
+        valid_id = validate_uuid(wallet_id, "wallet_id")
+        with closing(self.db_provider.get_connection()) as conn, read_transaction(conn):
+            wallet = get_wallet_by_id(conn, valid_id)
+            if wallet is None:
+                raise AppError(404, "NOT_FOUND", "Wallet not found.")
+            return wallet
+
+    def get_wallet_entries(
+        self,
+        wallet_id: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[LedgerEntryRecord]:
+        valid_id = validate_uuid(wallet_id, "wallet_id")
+        with closing(self.db_provider.get_connection()) as conn, read_transaction(conn):
+            if get_wallet_by_id(conn, valid_id) is None:
+                raise AppError(404, "NOT_FOUND", "Wallet not found.")
+            return list_entries_by_wallet(conn, valid_id, limit=limit, offset=offset)

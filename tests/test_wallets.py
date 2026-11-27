@@ -5,7 +5,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.config import MAX_AMOUNT_MINOR
-from app.persistence.database import read_transaction
+from app.domain.accounting import build_transfer_entries
+from app.domain.ledger import chain_entries
+from app.persistence.database import read_transaction, write_transaction
+from app.persistence.repositories.ledger_entry_repository import (
+    get_last_entry_hash,
+    insert_ledger_entries,
+)
+from app.persistence.repositories.transaction_repository import create_transaction
 from app.persistence.repositories.wallet_repository import get_system_wallet
 from app.persistence.schema import SYSTEM_USER_ID
 
@@ -114,3 +121,69 @@ def test_create_wallet_rejects_invalid_inputs_without_writing(
             "SELECT COUNT(*) FROM wallets WHERE is_system = 0"
         ).fetchone()[0]
     assert user_wallet_count == 0
+
+
+def test_get_wallet_and_entries_newest_first_with_pagination(
+    app: FastAPI, client: TestClient
+) -> None:
+    alice_id = _create_user(client, "Alice", "alice@example.com")
+    bob_id = _create_user(client, "Bob", "bob@example.com")
+
+    w1_id = client.post(
+        "/v1/wallets",
+        json={"user_id": alice_id, "currency": "INR", "opening_balance_minor": 1000},
+    ).json()["id"]
+    w2_id = client.post(
+        "/v1/wallets",
+        json={"user_id": bob_id, "currency": "INR", "opening_balance_minor": 0},
+    ).json()["id"]
+
+    # Add two more ledger entries affecting w1 so we can verify newest-first pagination
+    with closing(app.state.db_provider.get_connection()) as conn, write_transaction(conn):
+        for idx, amount in enumerate((100, 200), start=1):
+            tx_id = f"00000000-0000-0000-0000-00000000000{idx}"
+            now = f"2026-11-27T15:0{idx}:00+00:00"
+            create_transaction(conn, tx_id, "transfer", amount, "INR", now)
+            chained = chain_entries(
+                build_transfer_entries(w1_id, w2_id, amount, "INR"),
+                transaction_id=tx_id,
+                created_at=now,
+                initial_prev_hash=get_last_entry_hash(conn),
+            )
+            insert_ledger_entries(conn, chained)
+
+    get_res = client.get(f"/v1/wallets/{w1_id}")
+    assert get_res.status_code == 200
+    assert get_res.json()["balance_minor"] == 1000
+
+    page1 = client.get(f"/v1/wallets/{w1_id}/entries?limit=2&offset=0")
+    assert page1.status_code == 200
+    entries1 = page1.json()["entries"]
+    assert len(entries1) == 2
+    assert entries1[0]["seq"] > entries1[1]["seq"]
+    assert [e["amount_minor"] for e in entries1] == [200, 100]
+
+    page2 = client.get(f"/v1/wallets/{w1_id}/entries?limit=2&offset=2")
+    assert page2.status_code == 200
+    entries2 = page2.json()["entries"]
+    assert len(entries2) == 1
+    assert entries2[0]["amount_minor"] == 1000
+    assert entries2[0]["direction"] == "CREDIT"
+
+
+def test_get_wallet_and_entries_validation_and_not_found(client: TestClient) -> None:
+    user_id = _create_user(client)
+    wallet_id = client.post("/v1/wallets", json={"user_id": user_id, "currency": "USD"}).json()[
+        "id"
+    ]
+    missing_id = str(uuid.uuid4())
+
+    assert client.get("/v1/wallets/bad-id").status_code == 400
+    assert client.get(f"/v1/wallets/{missing_id}").status_code == 404
+
+    assert client.get("/v1/wallets/bad-id/entries").status_code == 400
+    assert client.get(f"/v1/wallets/{missing_id}/entries").status_code == 404
+    assert client.get(f"/v1/wallets/{wallet_id}/entries?limit=0").status_code == 400
+    assert client.get(f"/v1/wallets/{wallet_id}/entries?limit=101").status_code == 400
+    assert client.get(f"/v1/wallets/{wallet_id}/entries?offset=-1").status_code == 400
+    assert client.get(f"/v1/wallets/{wallet_id}/entries?limit=abc").status_code == 400
